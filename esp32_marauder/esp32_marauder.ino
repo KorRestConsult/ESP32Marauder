@@ -203,13 +203,6 @@ void setup()
     }
   #endif
 
-  #ifdef MARAUDER_KOR_BRIDGE
-    if (KorBridge::enabled()) {
-      KorBridge::begin();
-      return;
-    }
-  #endif
-
   #ifdef HAS_SCREEN
     display_obj.RunSetup();
     display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -346,18 +339,15 @@ void setup()
   
   Serial.println(F("CLI Ready"));
   cli_obj.RunSetup();
+
+  #ifdef MARAUDER_KOR_BRIDGE
+    KorBridge::begin();
+  #endif
 }
 
 
 void loop()
 {
-  #ifdef MARAUDER_KOR_BRIDGE
-    if (KorBridge::active()) {
-      KorBridge::loop();
-      return;
-    }
-  #endif
-
   currentTime = millis();
   bool mini = false;
 
@@ -420,6 +410,10 @@ void loop()
     stickc_led.main();
   #else
     led_obj.main(currentTime);
+  #endif
+
+  #ifdef MARAUDER_KOR_BRIDGE
+    KorBridge::loop(wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF);
   #endif
 
   #ifdef HAS_SCREEN

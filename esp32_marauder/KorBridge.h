@@ -8,10 +8,10 @@
 class KorBridge {
 public:
   static bool enabled();
-  static bool active();
   static void begin();
-  static void loop();
+  static void loop(bool marauderBusy);
   static bool handleCli(LinkedList<String>& args);
+  static String statusJson();
 };
 
 #endif
