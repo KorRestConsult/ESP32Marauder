@@ -4,6 +4,13 @@
 
   #define configs_h
 
+#ifdef MARAUDER_KOR_BRIDGE
+  // KOR Bridge is an extension of the standard Flipper Zero WiFi Dev Board target.
+  #ifndef MARAUDER_FLIPPER
+    #define MARAUDER_FLIPPER
+  #endif
+#endif
+
   #define POLISH_POTATO
 
   //// BOARD TARGETS
