@@ -44,6 +44,7 @@ jobs:
           git clone --depth 1 --branch 8.1.0 https://github.com/plerup/espsoftwareserial CustomLibs/EspSoftwareSerial
           git clone --depth 1 --branch 1.15.0 https://github.com/adafruit/Adafruit_BusIO CustomLibs/Adafruit_BusIO
           git clone --depth 1 --branch 1.0.2 https://github.com/adafruit/Adafruit_MAX1704X CustomLibs/Adafruit_MAX1704X
+          git clone --depth 1 --branch 2.7.2 https://github.com/Links2004/arduinoWebSockets CustomLibs/arduinoWebSockets
 
       - name: Patch ESP32 linker flags
         run: |
