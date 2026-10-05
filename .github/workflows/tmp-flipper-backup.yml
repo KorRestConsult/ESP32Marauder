@@ -2,8 +2,7 @@ name: Build Flipper Direct Backup
 
 on:
   push:
-    branches:
-      - tmp-flipper-backup
+    branches: [tmp-flipper-backup]
   workflow_dispatch:
 
 jobs:
@@ -11,43 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout helper source
-        run: |
-          git clone --depth 1 --branch v1 https://github.com/keetsta/wol-flipper.git helper
+        run: git clone --depth 1 --branch v1 https://github.com/keetsta/wol-flipper.git helper
       - name: Install uFBT
-        run: |
-          python3 -m pip install --upgrade ufbt
+        run: python3 -m pip install --upgrade ufbt
       - name: Patch helper to auto-backup
         working-directory: helper
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("wol_flipper.c")
-          s = p.read_text()
-          old = """    WolApp* app = wol_app_alloc();
-    scene_manager_next_scene(app->scene_manager, WolSceneStart);
-"""
-          new = """    WolApp* app = wol_app_alloc();
-
-    volatile bool cancel = false;
-    WolFlasher* flasher = wol_flasher_alloc(&cancel);
-    WolFlasherResult result = wol_flasher_connect(flasher);
-    if(result == WolFlasherOk) {
-        result = wol_flasher_backup(flasher, WOL_BACKUP_DIR "/esp-direct.bin");
-        wol_flasher_reset_target(flasher);
-    }
-    FURI_LOG_W("WolDirect", "direct backup result: %s", wol_flasher_result_text(result));
-    wol_flasher_free(flasher);
-
-    scene_manager_next_scene(app->scene_manager, WolSceneStart);
-"""
-          if old not in s:
-              raise SystemExit("patch anchor not found")
-          p.write_text(s.replace(old, new, 1))
-          PY
+        run: python3 -c 'from pathlib import Path; p=Path("wol_flipper.c"); s=p.read_text(); old="    WolApp* app = wol_app_alloc();\n    scene_manager_next_scene(app->scene_manager, WolSceneStart);\n"; new="    WolApp* app = wol_app_alloc();\n\n    volatile bool cancel = false;\n    WolFlasher* flasher = wol_flasher_alloc(&cancel);\n    WolFlasherResult result = wol_flasher_connect(flasher);\n    if(result == WolFlasherOk) {\n        result = wol_flasher_backup(flasher, WOL_BACKUP_DIR \"/esp-direct.bin\");\n        wol_flasher_reset_target(flasher);\n    }\n    FURI_LOG_W(\"WolDirect\", \"direct backup result: %s\", wol_flasher_result_text(result));\n    wol_flasher_free(flasher);\n\n    scene_manager_next_scene(app->scene_manager, WolSceneStart);\n"; assert old in s; p.write_text(s.replace(old,new,1))'
       - name: Build FAP
         working-directory: helper
-        run: |
-          ufbt
+        run: ufbt
       - name: Upload FAP
         uses: actions/upload-artifact@v4
         with:
