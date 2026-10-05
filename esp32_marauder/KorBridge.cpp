@@ -16,7 +16,10 @@
 namespace {
 
 constexpr uint8_t KOR_WIFI_SLOTS = 8;
+constexpr uint8_t KOR_NONCE_SLOTS = 8;
+constexpr uint8_t KOR_MAX_SAVED_ATTEMPTS = 3;
 constexpr uint32_t KOR_WIFI_RETRY_MS = 15000;
+constexpr uint32_t KOR_CONNECT_TIMEOUT_MS = 5000;
 constexpr uint32_t KOR_APP_HEARTBEAT_MS = 15000;
 constexpr uint16_t KOR_DEFAULT_RELAY_PORT = 443;
 
@@ -25,14 +28,13 @@ WebServer provision_server(80);
 WebSocketsClient web_socket;
 
 bool bridge_active = false;
+bool marauder_busy = false;
+bool paused_for_marauder = false;
 bool provisioning = false;
 bool provision_routes_ready = false;
-bool provision_saved = false;
 bool relay_started = false;
 bool relay_connected = false;
 bool relay_authenticated = false;
-bool paused_for_marauder = false;
-bool marauder_busy = false;
 
 uint32_t last_wifi_attempt = 0;
 uint32_t last_heartbeat = 0;
@@ -43,11 +45,14 @@ String device_id;
 String boot_nonce;
 String auth_token;
 String ap_password;
+
 String relay_host;
 String relay_path;
 String relay_ca;
 uint16_t relay_port = KOR_DEFAULT_RELAY_PORT;
-String local_cli_line;
+
+String nonce_history[KOR_NONCE_SLOTS];
+uint8_t nonce_cursor = 0;
 
 String keyFor(const char* prefix, uint8_t index) {
   return String(prefix) + String(index);
@@ -81,12 +86,23 @@ String makeDeviceId() {
 String ensureToken() {
   prefs.begin("korbridge", false);
   String token = prefs.getString("token", "");
-  if(token.length() < 48) {
+  if(token.length() < 64) {
     token = randomHex(32);
     prefs.putString("token", token);
   }
   prefs.end();
   return token;
+}
+
+String ensureApPassword() {
+  prefs.begin("korbridge", false);
+  String password = prefs.getString("ap_pass", "");
+  if(password.length() < 12) {
+    password = randomHex(8);
+    prefs.putString("ap_pass", password);
+  }
+  prefs.end();
+  return password;
 }
 
 String hmacHex(const String& key, const String& message) {
@@ -102,15 +118,19 @@ String hmacHex(const String& key, const String& message) {
     return "";
   }
 
-  mbedtls_md_hmac_starts(
-    &ctx,
-    reinterpret_cast<const unsigned char*>(key.c_str()),
-    key.length());
-  mbedtls_md_hmac_update(
-    &ctx,
-    reinterpret_cast<const unsigned char*>(message.c_str()),
-    message.length());
-  mbedtls_md_hmac_finish(&ctx, digest);
+  if(mbedtls_md_hmac_starts(
+       &ctx,
+       reinterpret_cast<const unsigned char*>(key.c_str()),
+       key.length()) != 0 ||
+     mbedtls_md_hmac_update(
+       &ctx,
+       reinterpret_cast<const unsigned char*>(message.c_str()),
+       message.length()) != 0 ||
+     mbedtls_md_hmac_finish(&ctx, digest) != 0) {
+    mbedtls_md_free(&ctx);
+    return "";
+  }
+
   mbedtls_md_free(&ctx);
 
   static const char* hex = "0123456789abcdef";
@@ -126,16 +146,20 @@ String hmacHex(const String& key, const String& message) {
 bool secureEqual(const String& a, const String& b) {
   if(a.length() != b.length()) return false;
   uint8_t diff = 0;
-  for(size_t i = 0; i < a.length(); ++i) diff |= (uint8_t)(a[i] ^ b[i]);
+  for(size_t i = 0; i < a.length(); ++i) {
+    diff |= (uint8_t)(a.charAt(i) ^ b.charAt(i));
+  }
   return diff == 0;
 }
 
 bool loadWifiProfile(uint8_t index, String& ssid, String& password) {
   if(index >= KOR_WIFI_SLOTS) return false;
+
   prefs.begin("korbridge", true);
   ssid = prefs.getString(keyFor("s", index).c_str(), "");
   password = prefs.getString(keyFor("p", index).c_str(), "");
   prefs.end();
+
   return ssid.length() > 0;
 }
 
@@ -186,14 +210,14 @@ bool removeWifiProfile(uint8_t index) {
   return true;
 }
 
-bool openNetworksAllowed() {
+bool autoOpenAllowed() {
   prefs.begin("korbridge", true);
   const bool allowed = prefs.getBool("allow_open", false);
   prefs.end();
   return allowed;
 }
 
-void setOpenNetworksAllowed(bool allowed) {
+void setAutoOpenAllowed(bool allowed) {
   prefs.begin("korbridge", false);
   prefs.putBool("allow_open", allowed);
   prefs.end();
@@ -209,47 +233,64 @@ void loadRelayConfig() {
 
   if(stored_port == 0 || stored_port > 65535) stored_port = KOR_DEFAULT_RELAY_PORT;
   relay_port = (uint16_t)stored_port;
+
   if(relay_path.length() == 0) relay_path = "/device";
-  if(relay_path[0] != '/') relay_path = "/" + relay_path;
+  if(relay_path.charAt(0) != '/') relay_path = "/" + relay_path;
 }
 
-void saveRelayConfig(
-  const String& host,
-  uint16_t port,
-  const String& path,
-  const String& ca) {
+void saveRelayConfig(const String& host, uint16_t port, const String& path, const String& ca) {
+  String normalized_path = path;
+  if(normalized_path.length() == 0) normalized_path = "/device";
+  if(normalized_path.charAt(0) != '/') normalized_path = "/" + normalized_path;
+
   prefs.begin("korbridge", false);
   prefs.putString("relay_host", host);
   prefs.putUInt("relay_port", port);
-  prefs.putString("relay_path", path.length() ? path : "/device");
+  prefs.putString("relay_path", normalized_path);
   prefs.putString("relay_ca", ca);
   prefs.end();
+
   loadRelayConfig();
 }
 
 bool relayConfigReady() {
   return relay_host.length() > 0 &&
+         relay_port > 0 &&
          relay_path.length() > 0 &&
          relay_ca.indexOf("BEGIN CERTIFICATE") >= 0 &&
-         auth_token.length() >= 48;
+         auth_token.length() >= 64;
+}
+
+bool nonceSeen(const String& nonce) {
+  if(nonce.length() < 16 || nonce.length() > 96) return true;
+  for(uint8_t i = 0; i < KOR_NONCE_SLOTS; ++i) {
+    if(nonce_history[i] == nonce) return true;
+  }
+  return false;
+}
+
+void rememberNonce(const String& nonce) {
+  nonce_history[nonce_cursor] = nonce;
+  nonce_cursor = (nonce_cursor + 1) % KOR_NONCE_SLOTS;
 }
 
 String buildStatusJson() {
-  DynamicJsonDocument doc(768);
+  DynamicJsonDocument doc(896);
   doc["firmware"] = MARAUDER_VERSION;
+  doc["hardware"] = HARDWARE_NAME;
   doc["bridge_mode"] = bridge_active ? "passive-read-only" : "inactive";
-  doc["device"] = device_id;
+  doc["device"] = device_id.length() ? device_id : makeDeviceId();
   doc["uptime_ms"] = millis();
   doc["heap_free"] = ESP.getFreeHeap();
   doc["wifi_profiles"] = wifiProfileCount();
-  doc["allow_open_wifi"] = openNetworksAllowed();
+  doc["auto_open_wifi"] = autoOpenAllowed();
   doc["wifi_connected"] = WiFi.status() == WL_CONNECTED;
   doc["relay_configured"] = relayConfigReady();
   doc["relay_connected"] = relay_connected;
   doc["relay_authenticated"] = relay_authenticated;
   doc["provisioning"] = provisioning;
-  doc["rpc"] = "disabled-passive-milestone";
   doc["marauder_busy"] = marauder_busy;
+  doc["rpc"] = "staged-disabled";
 
   if(WiFi.status() == WL_CONNECTED) {
     doc["ssid"] = WiFi.SSID();
@@ -270,16 +311,18 @@ void sendEnvelope(const char* type, const String& name, const String& payload) {
   if(!relay_connected) return;
 
   const uint32_t seq = ++tx_seq;
+  const String nonce = randomHex(12);
   const String canonical =
     device_id + "|" + boot_nonce + "|" + seqToString(seq) + "|" +
-    String(type) + "|" + name + "|" + payload;
+    nonce + "|" + String(type) + "|" + name + "|" + payload;
 
-  DynamicJsonDocument doc(1792);
+  DynamicJsonDocument doc(2048);
   doc["v"] = 1;
   doc["type"] = type;
   doc["device"] = device_id;
   doc["session"] = boot_nonce;
   doc["seq"] = seq;
+  doc["nonce"] = nonce;
   doc["name"] = name;
   doc["payload"] = payload;
   doc["mac"] = hmacHex(auth_token, canonical);
@@ -290,77 +333,90 @@ void sendEnvelope(const char* type, const String& name, const String& payload) {
 }
 
 void remoteLog(const String& level, const String& message) {
-  if(!relay_authenticated) return;
+  if(!relay_connected) return;
 
-  DynamicJsonDocument doc(512);
-  doc["level"] = level;
-  doc["message"] = message;
+  DynamicJsonDocument log_doc(512);
+  log_doc["level"] = level;
+  log_doc["message"] = message;
+  log_doc["uptime_ms"] = millis();
 
   String payload;
-  serializeJson(doc, payload);
+  serializeJson(log_doc, payload);
   sendEnvelope("event", "log", payload);
 }
 
-bool verifyCommonEnvelope(JsonDocument& doc, const String& expected_type, String& canonical) {
+bool verifyCommandEnvelope(
+  JsonDocument& doc,
+  uint32_t& seq,
+  String& nonce,
+  String& cmd) {
+
   if((doc["v"] | 0) != 1) return false;
-  if(String((const char*)(doc["type"] | "")) != expected_type) return false;
+  if(String((const char*)(doc["type"] | "")) != "cmd") return false;
   if(String((const char*)(doc["device"] | "")) != device_id) return false;
   if(String((const char*)(doc["session"] | "")) != boot_nonce) return false;
 
-  const uint32_t seq = doc["seq"].as<uint32_t>();
+  seq = doc["seq"] | 0U;
+  nonce = String((const char*)(doc["nonce"] | ""));
+  cmd = String((const char*)(doc["cmd"] | ""));
+
   if(seq == 0 || seq <= last_rx_seq) return false;
+  if(nonceSeen(nonce)) return false;
+  if(cmd.length() == 0 || cmd.length() > 48) return false;
 
-  const String mac = String((const char*)(doc["mac"] | ""));
-  if(mac.length() != 64) return false;
+  const String provided = String((const char*)(doc["mac"] | ""));
+  if(provided.length() != 64) return false;
 
-  canonical = device_id + "|" + boot_nonce + "|" + seqToString(seq) + "|" + expected_type;
+  const String canonical =
+    device_id + "|" + boot_nonce + "|" + seqToString(seq) + "|" +
+    nonce + "|cmd|" + cmd;
+
+  const String expected = hmacHex(auth_token, canonical);
+  if(expected.length() != 64 || !secureEqual(expected, provided)) return false;
+
   return true;
 }
 
 void handleRelayText(uint8_t* payload, size_t length) {
-  DynamicJsonDocument doc(1536);
-  const DeserializationError err = deserializeJson(doc, payload, length);
-  if(err) return;
-
-  const String type = String((const char*)(doc["type"] | ""));
-
-  if(type == "auth") {
-    String canonical;
-    if(!verifyCommonEnvelope(doc, "auth", canonical)) return;
-
-    const String expected = hmacHex(auth_token, canonical);
-    const String provided = String((const char*)(doc["mac"] | ""));
-    if(!secureEqual(expected, provided)) return;
-
-    last_rx_seq = doc["seq"].as<uint32_t>();
-    relay_authenticated = true;
-    sendEnvelope("event", "status", buildStatusJson());
-    remoteLog("info", "relay authenticated");
+  DynamicJsonDocument doc(1024);
+  if(deserializeJson(doc, payload, length)) {
+    remoteLog("warn", "invalid_json");
     return;
   }
 
-  if(type != "cmd" || !relay_authenticated) return;
+  uint32_t seq = 0;
+  String nonce;
+  String cmd;
 
-  String canonical;
-  if(!verifyCommonEnvelope(doc, "cmd", canonical)) return;
+  if(!verifyCommandEnvelope(doc, seq, nonce, cmd)) {
+    remoteLog("warn", "invalid_or_replayed_command");
+    return;
+  }
 
-  const String cmd = String((const char*)(doc["cmd"] | ""));
-  canonical += "|" + cmd;
-
-  const String expected = hmacHex(auth_token, canonical);
-  const String provided = String((const char*)(doc["mac"] | ""));
-  if(!secureEqual(expected, provided)) return;
-
-  last_rx_seq = doc["seq"].as<uint32_t>();
+  last_rx_seq = seq;
+  rememberNonce(nonce);
+  relay_authenticated = true;
 
   if(cmd == "status") {
     sendEnvelope("response", "status", buildStatusJson());
-  } else if(cmd == "ping") {
-    sendEnvelope("response", "pong", "{\"ok\":true}");
-  } else {
-    sendEnvelope("response", "denied", "{\"error\":\"read_only_allowlist\"}");
-    remoteLog("warn", "denied remote command: " + cmd);
+    return;
   }
+
+  if(cmd == "ping") {
+    sendEnvelope("response", "pong", "{\"ok\":true}");
+    return;
+  }
+
+  if(cmd == "capabilities") {
+    sendEnvelope(
+      "response",
+      "capabilities",
+      "{\"readonly\":true,\"commands\":[\"status\",\"ping\",\"capabilities\"],\"rpc\":\"staged-disabled\"}");
+    return;
+  }
+
+  sendEnvelope("response", "denied", "{\"error\":\"command_not_allowlisted\"}");
+  remoteLog("warn", "denied remote command: " + cmd);
 }
 
 void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -369,6 +425,7 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
       relay_connected = true;
       relay_authenticated = false;
       sendEnvelope("hello", "device", buildStatusJson());
+      remoteLog("info", "relay_connected");
       break;
 
     case WStype_DISCONNECTED:
@@ -378,6 +435,10 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 
     case WStype_TEXT:
       handleRelayText(payload, length);
+      break;
+
+    case WStype_BIN:
+      remoteLog("warn", "binary_frame_denied_in_readonly_milestone");
       break;
 
     default:
@@ -398,13 +459,15 @@ void startRelay() {
   web_socket.onEvent(webSocketEvent);
   web_socket.setReconnectInterval(5000);
   web_socket.enableHeartbeat(15000, 3000, 2);
-  // Fail closed: WSS only with an explicitly provisioned CA certificate.
+
+  // Fail closed: no insecure TLS fallback. A CA certificate must be provisioned.
   web_socket.beginSslWithCA(
     relay_host.c_str(),
     relay_port,
     relay_path.c_str(),
     relay_ca.c_str(),
     "kor-bridge-v1");
+
   relay_started = true;
 }
 
@@ -417,31 +480,66 @@ bool waitForWifi(uint32_t timeout_ms) {
 }
 
 bool connectSavedWifi() {
-  WiFi.mode(provisioning ? WIFI_AP_STA : WIFI_STA);
+  WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
 
-  for(uint8_t i = 0; i < KOR_WIFI_SLOTS; ++i) {
+  const int found = WiFi.scanNetworks(false, true);
+  if(found <= 0) {
+    WiFi.scanDelete();
+    return false;
+  }
+
+  bool attempted[KOR_WIFI_SLOTS] = {false};
+
+  for(uint8_t attempt = 0; attempt < KOR_MAX_SAVED_ATTEMPTS; ++attempt) {
+    int best_profile = -1;
+    int32_t best_rssi = -1000;
+
+    for(uint8_t profile = 0; profile < KOR_WIFI_SLOTS; ++profile) {
+      if(attempted[profile]) continue;
+
+      String ssid, password;
+      if(!loadWifiProfile(profile, ssid, password)) continue;
+
+      for(int i = 0; i < found; ++i) {
+        if(WiFi.SSID(i) == ssid && WiFi.RSSI(i) > best_rssi) {
+          best_profile = profile;
+          best_rssi = WiFi.RSSI(i);
+        }
+      }
+    }
+
+    if(best_profile < 0) break;
+    attempted[best_profile] = true;
+
     String ssid, password;
-    if(!loadWifiProfile(i, ssid, password)) continue;
+    if(!loadWifiProfile((uint8_t)best_profile, ssid, password)) continue;
 
     WiFi.disconnect(false, false);
     delay(50);
 
-    if(password.length() > 0) WiFi.begin(ssid.c_str(), password.c_str());
+    if(password.length()) WiFi.begin(ssid.c_str(), password.c_str());
     else WiFi.begin(ssid.c_str());
 
-    if(waitForWifi(7000)) return true;
+    if(waitForWifi(KOR_CONNECT_TIMEOUT_MS)) {
+      WiFi.scanDelete();
+      return true;
+    }
   }
 
+  WiFi.scanDelete();
   return false;
 }
 
 bool connectBestOpenWifi() {
-  if(!openNetworksAllowed()) return false;
+  if(!autoOpenAllowed()) return false;
 
-  WiFi.mode(provisioning ? WIFI_AP_STA : WIFI_STA);
+  WiFi.mode(WIFI_STA);
   const int count = WiFi.scanNetworks(false, true);
-  if(count <= 0) return false;
+  if(count <= 0) {
+    WiFi.scanDelete();
+    return false;
+  }
 
   int best = -1;
   int32_t best_rssi = -1000;
@@ -464,7 +562,23 @@ bool connectBestOpenWifi() {
   WiFi.disconnect(false, false);
   delay(50);
   WiFi.begin(ssid.c_str());
-  return waitForWifi(7000);
+  return waitForWifi(KOR_CONNECT_TIMEOUT_MS);
+}
+
+String htmlEscape(const String& input) {
+  String out;
+  out.reserve(input.length() + 16);
+
+  for(size_t i = 0; i < input.length(); ++i) {
+    const char c = input.charAt(i);
+    if(c == '&') out += F("&amp;");
+    else if(c == '<') out += F("&lt;");
+    else if(c == '>') out += F("&gt;");
+    else if(c == '"') out += F("&quot;");
+    else out += c;
+  }
+
+  return out;
 }
 
 void prepareProvisionRoutes() {
@@ -472,21 +586,30 @@ void prepareProvisionRoutes() {
   provision_routes_ready = true;
 
   provision_server.on("/", HTTP_GET, []() {
-    String page =
-      "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
-      "<title>KOR Bridge</title></head><body><h2>KOR Bridge provisioning</h2>"
-      "<p>Device: " + device_id + "</p>"
-      "<form method='POST' action='/save'>"
-      "<label>Wi-Fi SSID</label><br><input name='ssid' maxlength='32'><br>"
-      "<label>Wi-Fi password (blank=open)</label><br><input name='password' type='password' maxlength='63'><br>"
-      "<label>Relay host</label><br><input name='relay_host'><br>"
-      "<label>Relay port</label><br><input name='relay_port' value='443'><br>"
-      "<label>Relay path</label><br><input name='relay_path' value='/device'><br>"
-      "<label>TLS CA certificate (PEM)</label><br><textarea name='relay_ca' rows='10' cols='44'></textarea><br><br>"
-      "<button type='submit'>Save</button></form>"
-      "<p>After saving, reconnect your phone to normal Wi-Fi.</p></body></html>";
+    loadRelayConfig();
 
-    provision_server.send(200, "text/html", page);
+    String page;
+    page.reserve(5500);
+    page += F("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>");
+    page += F("<title>KOR Bridge</title></head><body><h2>KOR Bridge provisioning</h2>");
+    page += F("<p>Device: ");
+    page += htmlEscape(device_id);
+    page += F("</p><form method='POST' action='/save'>");
+    page += F("<h3>Wi-Fi</h3><input name='ssid' maxlength='32' placeholder='SSID'><br>");
+    page += F("<input name='password' maxlength='63' type='password' placeholder='Password; blank = open network'><br>");
+    page += F("<h3>Relay</h3><input name='relay_host' placeholder='relay.example.com' value='");
+    page += htmlEscape(relay_host);
+    page += F("'><br><input name='relay_port' type='number' value='");
+    page += String(relay_port);
+    page += F("'><br><input name='relay_path' value='");
+    page += htmlEscape(relay_path);
+    page += F("'><br><textarea name='relay_ca' rows='12' cols='48' placeholder='PEM CA certificate'>");
+    page += htmlEscape(relay_ca);
+    page += F("</textarea><br><button type='submit'>Save and reboot bridge</button></form>");
+    page += F("<form method='POST' action='/disable'><button type='submit'>Disable KOR Bridge</button></form>");
+    page += F("</body></html>");
+
+    provision_server.send(200, "text/html; charset=utf-8", page);
   });
 
   provision_server.on("/status", HTTP_GET, []() {
@@ -494,58 +617,105 @@ void prepareProvisionRoutes() {
   });
 
   provision_server.on("/save", HTTP_POST, []() {
+    bool ok = true;
+
     const String ssid = provision_server.arg("ssid");
     const String password = provision_server.arg("password");
+    if(ssid.length()) ok = saveWifiProfile(ssid, password);
+
     const String host = provision_server.arg("relay_host");
     const String path = provision_server.arg("relay_path");
     const String ca = provision_server.arg("relay_ca");
     long port_value = provision_server.arg("relay_port").toInt();
 
-    if(port_value <= 0 || port_value > 65535) port_value = KOR_DEFAULT_RELAY_PORT;
-
-    bool ok = true;
-    if(ssid.length()) ok = saveWifiProfile(ssid, password);
-    if(host.length()) {
-      if(ca.indexOf("BEGIN CERTIFICATE") < 0) ok = false;
-      else saveRelayConfig(host, (uint16_t)port_value, path, ca);
+    if(host.length() || ca.length()) {
+      if(host.length() == 0 ||
+         ca.indexOf("BEGIN CERTIFICATE") < 0 ||
+         port_value <= 0 ||
+         port_value > 65535) {
+        ok = false;
+      } else {
+        saveRelayConfig(host, (uint16_t)port_value, path, ca);
+      }
     }
 
-    provision_saved = ok;
     provision_server.send(
       ok ? 200 : 400,
       "text/plain",
-      ok ? "Saved. KOR Bridge will reconnect." : "Invalid settings.");
+      ok ? "Saved. ESP32 is rebooting." : "Invalid settings.");
+
+    if(ok) {
+      delay(400);
+      ESP.restart();
+    }
+  });
+
+  provision_server.on("/disable", HTTP_POST, []() {
+    prefs.begin("korbridge", false);
+    prefs.putBool("enabled", false);
+    prefs.end();
+
+    provision_server.send(200, "text/plain", "KOR Bridge disabled. ESP32 is rebooting.");
+    delay(400);
+    ESP.restart();
   });
 }
 
 void startProvisioning() {
-  if(provisioning) return;
+  if(provisioning || marauder_busy) return;
+
+  stopRelay();
 
   provisioning = true;
-  if(ap_password.length() < 12) ap_password = randomHex(8);
+  ap_password = ensureApPassword();
 
-  WiFi.mode(WIFI_AP_STA);
-  const String ssid = "KOR-" + device_id.substring(device_id.length() > 6 ? device_id.length() - 6 : 0);
+  WiFi.disconnect(false, false);
+  delay(50);
+  WiFi.mode(WIFI_AP);
+
+  const String suffix = device_id.substring(device_id.length() > 6 ? device_id.length() - 6 : 0);
+  const String ssid = "KOR-Setup-" + suffix;
+
   WiFi.softAP(ssid.c_str(), ap_password.c_str());
 
   prepareProvisionRoutes();
   provision_server.begin();
 
-  Serial.println(F("@KOR provisioning active"));
-  Serial.print(F("@KOR AP: "));
+  Serial.print(F("@KOR provisioning AP: "));
   Serial.println(ssid);
-  Serial.print(F("@KOR AP password: "));
+  Serial.print(F("@KOR provisioning password: "));
   Serial.println(ap_password);
-  Serial.println(F("@KOR URL: http://192.168.4.1/"));
+  Serial.println(F("@KOR provisioning URL: http://192.168.4.1/"));
 }
 
 void stopProvisioning() {
   if(!provisioning) return;
+
   provision_server.stop();
   WiFi.softAPdisconnect(true);
   provisioning = false;
-  provision_saved = false;
   WiFi.mode(WIFI_STA);
+}
+
+void tryNetworkAndRelay() {
+  if(marauder_busy) return;
+
+  if(WiFi.status() != WL_CONNECTED) {
+    if(relay_started) stopRelay();
+
+    if(!connectSavedWifi() && !connectBestOpenWifi()) {
+      startProvisioning();
+      return;
+    }
+  }
+
+  if(!relayConfigReady()) {
+    startProvisioning();
+    return;
+  }
+
+  if(provisioning) stopProvisioning();
+  startRelay();
 }
 
 void printStatus() {
@@ -562,23 +732,20 @@ bool KorBridge::enabled() {
 }
 
 void KorBridge::begin() {
-  bridge_active = enabled();
-  if(!bridge_active) return;
-
   device_id = makeDeviceId();
   boot_nonce = randomHex(16);
   auth_token = ensureToken();
+  ap_password = ensureApPassword();
   loadRelayConfig();
+
+  bridge_active = enabled();
+  if(!bridge_active) return;
 
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
 
-  if(!connectSavedWifi()) connectBestOpenWifi();
-
-  if(WiFi.status() == WL_CONNECTED && relayConfigReady()) startRelay();
-  else startProvisioning();
-
-  Serial.println(F("@KOR bridge mode: PASSIVE/READ-ONLY"));
+  Serial.println(F("@KOR bridge enabled: PASSIVE/READ-ONLY"));
+  tryNetworkAndRelay();
 }
 
 void KorBridge::loop(bool marauderBusy) {
@@ -586,7 +753,7 @@ void KorBridge::loop(bool marauderBusy) {
 
   marauder_busy = marauderBusy;
 
-  if(marauderBusy) {
+  if(marauder_busy) {
     if(!paused_for_marauder) {
       paused_for_marauder = true;
       stopRelay();
@@ -605,42 +772,31 @@ void KorBridge::loop(bool marauderBusy) {
 
   if(provisioning) {
     provision_server.handleClient();
-
-    if(provision_saved) {
-      delay(250);
-      stopProvisioning();
-      stopRelay();
-      WiFi.disconnect(false, false);
-      last_wifi_attempt = 0;
-    }
-  }
-
-  if(WiFi.status() != WL_CONNECTED) {
-    if(relay_started) stopRelay();
-
-    if(millis() - last_wifi_attempt >= KOR_WIFI_RETRY_MS) {
-      last_wifi_attempt = millis();
-
-      if(!connectSavedWifi() && !connectBestOpenWifi()) {
-        startProvisioning();
-      }
-    }
-
-    delay(5);
+    delay(1);
     return;
   }
 
-  if(relayConfigReady()) {
-    if(provisioning) stopProvisioning();
-    startRelay();
-    web_socket.loop();
-
-    if(relay_authenticated && millis() - last_heartbeat >= KOR_APP_HEARTBEAT_MS) {
-      last_heartbeat = millis();
-      sendEnvelope("event", "heartbeat", buildStatusJson());
+  if(WiFi.status() != WL_CONNECTED) {
+    if(millis() - last_wifi_attempt >= KOR_WIFI_RETRY_MS) {
+      last_wifi_attempt = millis();
+      tryNetworkAndRelay();
     }
-  } else {
+    delay(1);
+    return;
+  }
+
+  if(!relayConfigReady()) {
     startProvisioning();
+    delay(1);
+    return;
+  }
+
+  if(!relay_started) startRelay();
+  if(relay_started) web_socket.loop();
+
+  if(relay_connected && millis() - last_heartbeat >= KOR_APP_HEARTBEAT_MS) {
+    last_heartbeat = millis();
+    sendEnvelope("event", "heartbeat", buildStatusJson());
   }
 
   delay(1);
@@ -660,7 +816,7 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
     Serial.println(F("kor wifi list"));
     Serial.println(F("kor wifi add <ssid> [password]"));
     Serial.println(F("kor wifi remove <index>"));
-    Serial.println(F("kor wifi open on|off"));
+    Serial.println(F("kor wifi auto-open on|off"));
     Serial.println(F("kor relay show"));
     Serial.println(F("kor relay set <host> <port> <path>"));
     Serial.println(F("kor provision"));
@@ -692,13 +848,11 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
       return true;
     }
 
-    if(on) ensureToken();
-
     prefs.begin("korbridge", false);
     prefs.putBool("enabled", on);
     prefs.end();
 
-    Serial.println(on ? F("KOR Bridge enabled; rebooting") : F("KOR Bridge disabled; rebooting"));
+    Serial.println(on ? F("KOR Bridge enabled; rebooting ESP32") : F("KOR Bridge disabled; rebooting ESP32"));
     delay(250);
     ESP.restart();
     return true;
@@ -713,7 +867,8 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
         if(loadWifiProfile(i, ssid, password)) {
           Serial.print(i);
           Serial.print(F(": "));
-          Serial.println(ssid);
+          Serial.print(ssid);
+          Serial.println(password.length() ? F(" [secured]") : F(" [open]"));
         }
       }
       return true;
@@ -728,17 +883,22 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
 
     if(action == "remove" && args.size() >= 4) {
       const int idx = args.get(3).toInt();
+      if(idx < 0 || idx >= KOR_WIFI_SLOTS) {
+        Serial.println(F("ERR"));
+        return true;
+      }
       Serial.println(removeWifiProfile((uint8_t)idx) ? F("OK") : F("ERR"));
       return true;
     }
 
-    if(action == "open" && args.size() >= 4) {
-      if(args.get(3) == "on") setOpenNetworksAllowed(true);
-      else if(args.get(3) == "off") setOpenNetworksAllowed(false);
+    if(action == "auto-open" && args.size() >= 4) {
+      if(args.get(3) == "on") setAutoOpenAllowed(true);
+      else if(args.get(3) == "off") setAutoOpenAllowed(false);
       else {
         Serial.println(F("ERR: use on|off"));
         return true;
       }
+
       Serial.println(F("OK"));
       return true;
     }
@@ -749,20 +909,23 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
 
     if(action == "show") {
       loadRelayConfig();
+
       Serial.print(F("host="));
       Serial.println(relay_host);
       Serial.print(F("port="));
       Serial.println(relay_port);
       Serial.print(F("path="));
       Serial.println(relay_path);
-      Serial.print(F("ca="));
-      Serial.println(relay_ca.indexOf("BEGIN CERTIFICATE") >= 0 ? F("set") : F("not-set"));
+      Serial.print(F("ca_set="));
+      Serial.println(relay_ca.indexOf("BEGIN CERTIFICATE") >= 0 ? F("yes") : F("no"));
+      Serial.print(F("connected="));
+      Serial.println(relay_connected ? F("yes") : F("no"));
       return true;
     }
 
     if(action == "set" && args.size() >= 6) {
       const String host = args.get(3);
-      long port_value = args.get(4).toInt();
+      const long port_value = args.get(4).toInt();
       const String path = args.get(5);
 
       if(host.length() == 0 || port_value <= 0 || port_value > 65535) {
@@ -772,7 +935,7 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
 
       saveRelayConfig(host, (uint16_t)port_value, path, relay_ca);
       stopRelay();
-      Serial.println(F("OK: endpoint saved; CA PEM via local provisioning"));
+      Serial.println(F("OK: endpoint saved; provision CA certificate via kor provision"));
       return true;
     }
   }
@@ -786,14 +949,15 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
   if(sub == "token" && args.size() >= 3) {
     const String token = args.get(2);
 
-    if(token.length() < 48) {
-      Serial.println(F("ERR: token must be at least 48 chars"));
+    if(token.length() < 64) {
+      Serial.println(F("ERR: token must be at least 64 chars"));
       return true;
     }
 
     prefs.begin("korbridge", false);
     prefs.putString("token", token);
     prefs.end();
+
     auth_token = token;
     stopRelay();
     Serial.println(F("OK"));
