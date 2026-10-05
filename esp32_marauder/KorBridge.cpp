@@ -31,11 +31,12 @@ bool provision_saved = false;
 bool relay_started = false;
 bool relay_connected = false;
 bool relay_authenticated = false;
+bool marauder_busy = false;
 
 uint32_t last_wifi_attempt = 0;
 uint32_t last_heartbeat = 0;
-uint64_t tx_seq = 0;
-uint64_t last_rx_seq = 0;
+uint32_t tx_seq = 0;
+uint32_t last_rx_seq = 0;
 
 String device_id;
 String boot_nonce;
@@ -247,6 +248,7 @@ String buildStatusJson() {
   doc["relay_authenticated"] = relay_authenticated;
   doc["provisioning"] = provisioning;
   doc["rpc"] = "disabled-passive-milestone";
+  doc["marauder_busy"] = marauder_busy;
 
   if(WiFi.status() == WL_CONNECTED) {
     doc["ssid"] = WiFi.SSID();
@@ -266,7 +268,7 @@ String buildStatusJson() {
 void sendEnvelope(const char* type, const String& name, const String& payload) {
   if(!relay_connected) return;
 
-  const uint64_t seq = ++tx_seq;
+  const uint32_t seq = ++tx_seq;
   const String canonical =
     device_id + "|" + boot_nonce + "|" + u64ToString(seq) + "|" +
     String(type) + "|" + name + "|" + payload;
@@ -304,7 +306,7 @@ bool verifyCommonEnvelope(JsonDocument& doc, const String& expected_type, String
   if(String((const char*)(doc["device"] | "")) != device_id) return false;
   if(String((const char*)(doc["session"] | "")) != boot_nonce) return false;
 
-  const uint64_t seq = doc["seq"].as<uint64_t>();
+  const uint32_t seq = doc["seq"].as<uint32_t>();
   if(seq == 0 || seq <= last_rx_seq) return false;
 
   const String mac = String((const char*)(doc["mac"] | ""));
@@ -329,7 +331,7 @@ void handleRelayText(uint8_t* payload, size_t length) {
     const String provided = String((const char*)(doc["mac"] | ""));
     if(!secureEqual(expected, provided)) return;
 
-    last_rx_seq = doc["seq"].as<uint64_t>();
+    last_rx_seq = doc["seq"].as<uint32_t>();
     relay_authenticated = true;
     sendEnvelope("event", "status", buildStatusJson());
     remoteLog("info", "relay authenticated");
@@ -348,7 +350,7 @@ void handleRelayText(uint8_t* payload, size_t length) {
   const String provided = String((const char*)(doc["mac"] | ""));
   if(!secureEqual(expected, provided)) return;
 
-  last_rx_seq = doc["seq"].as<uint64_t>();
+  last_rx_seq = doc["seq"].as<uint32_t>();
 
   if(cmd == "status") {
     sendEnvelope("response", "status", buildStatusJson());
@@ -614,10 +616,6 @@ bool KorBridge::enabled() {
   return value;
 }
 
-bool KorBridge::active() {
-  return bridge_active;
-}
-
 void KorBridge::begin() {
   bridge_active = true;
   device_id = makeDeviceId();
@@ -636,7 +634,8 @@ void KorBridge::begin() {
   Serial.println(F("@KOR bridge mode: PASSIVE/READ-ONLY"));
 }
 
-void KorBridge::loop() {
+void KorBridge::loop(bool marauderBusy) {
+  marauder_busy = marauderBusy;
   pumpLocalCli();
 
   if(provisioning) {
@@ -680,6 +679,10 @@ void KorBridge::loop() {
   }
 
   delay(1);
+}
+
+String KorBridge::statusJson() {
+  return buildStatusJson();
 }
 
 bool KorBridge::handleCli(LinkedList<String>& args) {
