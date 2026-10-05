@@ -10,7 +10,8 @@
 namespace {
 
 constexpr uint32_t KOR_RPC_BAUD = 230400;
-constexpr uint32_t KOR_MARAUDER_BAUD = 115200;
+constexpr uint32_t KOR_MARAUDER_LEGACY_BAUD = 115200;
+constexpr uint32_t KOR_MARAUDER_FAST_BAUD = 230400;
 constexpr uint32_t KOR_FRAME_TIMEOUT_MS = 220;
 constexpr uint32_t KOR_HEARTBEAT_MS = 150;
 
@@ -100,10 +101,10 @@ bool firstByteLooksLikeMarauderCli() {
   return value == '\r' || value == '\n' || (value >= 0x20 && value <= 0x7E);
 }
 
-void releaseUart() {
+void releaseUart(uint32_t marauder_baud = KOR_MARAUDER_LEGACY_BAUD) {
   rpc_active = false;
   uart_owned = false;
-  Serial.updateBaudRate(KOR_MARAUDER_BAUD);
+  Serial.updateBaudRate(marauder_baud);
 }
 
 bool handleIncomingFrame(const ExpansionFrame& frame) {
@@ -225,7 +226,9 @@ void KorExpansionRpc::loop() {
   // If the Flipper application has taken UART back, fail closed and return
   // ownership to stock Marauder. Bytes are intentionally left untouched.
   if(firstByteLooksLikeMarauderCli()) {
-    releaseUart();
+    // While RPC is active UART is already at 230400. A printable Marauder
+    // wake/CLI byte at this baud means the modern app has taken ownership.
+    releaseUart(KOR_MARAUDER_FAST_BAUD);
     return;
   }
 
