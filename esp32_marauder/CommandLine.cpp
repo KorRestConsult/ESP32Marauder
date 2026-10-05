@@ -1,4 +1,4 @@
-#include "CommandLine.h"
+#include "CommandLine.h"\n#ifdef MARAUDER_KOR_BRIDGE\n#include "KorBridge.h"\n#endif
 
 CommandLine::CommandLine() {
 }
