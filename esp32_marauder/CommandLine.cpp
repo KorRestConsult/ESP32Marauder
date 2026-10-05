@@ -1,4 +1,7 @@
-#include "CommandLine.h"\n#ifdef MARAUDER_KOR_BRIDGE\n#include "KorBridge.h"\n#endif
+#include "CommandLine.h"
+#ifdef MARAUDER_KOR_BRIDGE
+#include "KorBridge.h"
+#endif
 
 CommandLine::CommandLine() {
 }
@@ -202,6 +205,10 @@ void CommandLine::runCommand(String input) {
     Serial.println("#" + input);
 
   LinkedList<String> cmd_args = this->parseCommand(input, " ");
+
+  #ifdef MARAUDER_KOR_BRIDGE
+    if (KorBridge::handleCli(cmd_args)) return;
+  #endif
   
   //// Admin commands
   // Help
