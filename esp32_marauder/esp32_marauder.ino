@@ -45,7 +45,10 @@ https://www.online-utility.org/image/convert/to/XBM
 #endif
 
 #include "settings.h"
-#include "CommandLine.h"\n#ifdef MARAUDER_KOR_BRIDGE\n  #include "KorBridge.h"\n#endif
+#include "CommandLine.h"
+#ifdef MARAUDER_KOR_BRIDGE
+  #include "KorBridge.h"
+#endif
 #include "lang_var.h"
 
 #ifdef HAS_BATTERY
@@ -200,6 +203,13 @@ void setup()
     }
   #endif
 
+  #ifdef MARAUDER_KOR_BRIDGE
+    if (KorBridge::enabled()) {
+      KorBridge::begin();
+      return;
+    }
+  #endif
+
   #ifdef HAS_SCREEN
     display_obj.RunSetup();
     display_obj.tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -341,6 +351,13 @@ void setup()
 
 void loop()
 {
+  #ifdef MARAUDER_KOR_BRIDGE
+    if (KorBridge::active()) {
+      KorBridge::loop();
+      return;
+    }
+  #endif
+
   currentTime = millis();
   bool mini = false;
 
