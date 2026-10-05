@@ -10,6 +10,7 @@ public:
   static bool enabled();
   static void begin();
   static void loop(bool marauderBusy);
+  static bool ownsUart();
   static bool handleCli(LinkedList<String>& args);
   static String statusJson();
 };
