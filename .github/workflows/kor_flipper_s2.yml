@@ -1,4 +1,4 @@
-name: KOR Flipper S2 Stock Build
+name: KOR Flipper S2 Bridge Build
 
 on:
   workflow_dispatch:
@@ -131,19 +131,19 @@ jobs:
             sed -i 's/compiler.c.elf.libs.esp32s2=/compiler.c.elf.libs.esp32s2=-zmuldefs /' "$i"
           done
 
-      - name: Compile stock Marauder 1.7.0
+      - name: Compile KOR Bridge Marauder
         uses: ArminJo/arduino-test-compile@v3.2.1
         with:
           sketch-names: esp32_marauder.ino
           arduino-board-fqbn: esp32:esp32:esp32s2:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=enabled
-          extra-arduino-cli-args: "--warnings none --build-property compiler.cpp.extra_flags='-DMARAUDER_FLIPPER'"
+          extra-arduino-cli-args: "--warnings none --build-property compiler.cpp.extra_flags='-DMARAUDER_FLIPPER -DMARAUDER_KOR_BRIDGE'"
           arduino-platform: esp32:esp32@2.0.11
           platform-url: https://github.com/espressif/arduino-esp32/releases/download/2.0.11/package_esp32_dev_index.json
 
       - name: Prepare artifact
         run: |
           mkdir -p artifact
-          cp esp32_marauder/build/esp32.esp32.esp32s2/esp32_marauder.ino.bin artifact/esp32_marauder.flipper.stock.bin
+          cp esp32_marauder/build/esp32.esp32.esp32s2/esp32_marauder.ino.bin artifact/kor-marauder-s2.bin
           cp esp32_marauder/build/esp32.esp32.esp32s2/*.bin artifact/
           shasum -a 256 artifact/* > artifact/SHA256SUMS.txt
           ls -lah artifact
@@ -151,6 +151,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: marauder-flipper-s2-stock
+          name: kor-marauder-s2-bridge
           path: artifact/
           retention-days: 14
