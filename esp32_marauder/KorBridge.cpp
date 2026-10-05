@@ -4,6 +4,10 @@
 
 #include "configs.h"
 
+#ifdef MARAUDER_KOR_RPC
+#include "KorExpansionRpc.h"
+#endif
+
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -152,6 +156,254 @@ bool secureEqual(const String& a, const String& b) {
   return diff == 0;
 }
 
+#ifdef MARAUDER_KOR_RPC
+
+bool readProtoVarint(const uint8_t* data, size_t size, size_t& pos, uint64_t& value) {
+  value = 0;
+  uint8_t shift = 0;
+
+  for(uint8_t i = 0; i < 10 && pos < size; ++i) {
+    const uint8_t b = data[pos++];
+    value |= ((uint64_t)(b & 0x7F)) << shift;
+    if((b & 0x80) == 0) return true;
+    shift += 7;
+  }
+
+  return false;
+}
+
+bool skipProtoField(const uint8_t* data, size_t size, size_t& pos, uint8_t wire_type) {
+  uint64_t length = 0;
+
+  switch(wire_type) {
+    case 0:
+      return readProtoVarint(data, size, pos, length);
+
+    case 1:
+      if(size - pos < 8) return false;
+      pos += 8;
+      return true;
+
+    case 2:
+      if(!readProtoVarint(data, size, pos, length)) return false;
+      if(length > size - pos) return false;
+      pos += (size_t)length;
+      return true;
+
+    case 5:
+      if(size - pos < 4) return false;
+      pos += 4;
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+bool allowedReadOnlyRpcTag(uint32_t field) {
+  switch(field) {
+    case 5:   // system_ping_request
+    case 32:  // system_device_info_request
+    case 35:  // system_get_datetime_request
+    case 39:  // system_protobuf_version_request
+    case 44:  // system_power_info_request
+    case 28:  // storage_info_request
+    case 59:  // storage_timestamp_request
+    case 24:  // storage_stat_request
+    case 7:   // storage_list_request
+    case 9:   // storage_read_request
+    case 14:  // storage_md5sum_request
+    case 17:  // app_lock_status_request
+    case 63:  // app_get_error_request
+    case 53:  // gpio_get_pin_mode
+    case 55:  // gpio_read_pin
+    case 72:  // gpio_get_otg_mode
+    case 61:  // property_get_request
+    case 66:  // desktop_is_locked_request
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+bool validateReadOnlyDelimitedPbMain(const uint8_t* data, size_t size) {
+  if(!data || size < 2 || size > 8192) return false;
+
+  size_t pos = 0;
+  uint64_t message_size = 0;
+  if(!readProtoVarint(data, size, pos, message_size)) return false;
+  if(message_size == 0 || message_size > size - pos) return false;
+
+  const size_t message_end = pos + (size_t)message_size;
+  if(message_end != size) return false;
+
+  bool found_content = false;
+
+  while(pos < message_end) {
+    uint64_t key = 0;
+    if(!readProtoVarint(data, message_end, pos, key)) return false;
+
+    const uint32_t field = (uint32_t)(key >> 3);
+    const uint8_t wire_type = (uint8_t)(key & 0x07);
+
+    if(field == 0) return false;
+
+    if(field == 3) {
+      uint64_t has_next = 0;
+      if(wire_type != 0 || !readProtoVarint(data, message_end, pos, has_next)) return false;
+      if(has_next != 0) return false;
+      continue;
+    }
+
+    if(field >= 4) {
+      if(found_content || !allowedReadOnlyRpcTag(field)) return false;
+      found_content = true;
+    }
+
+    if(!skipProtoField(data, message_end, pos, wire_type)) return false;
+  }
+
+  return found_content && pos == message_end;
+}
+
+String bytesToHex(const uint8_t* data, size_t size) {
+  static const char* hex = "0123456789abcdef";
+  String out;
+  out.reserve(size * 2);
+
+  for(size_t i = 0; i < size; ++i) {
+    out += hex[(data[i] >> 4) & 0x0F];
+    out += hex[data[i] & 0x0F];
+  }
+
+  return out;
+}
+
+uint32_t readU32Be(const uint8_t* p) {
+  return ((uint32_t)p[0] << 24) |
+         ((uint32_t)p[1] << 16) |
+         ((uint32_t)p[2] << 8) |
+         (uint32_t)p[3];
+}
+
+void writeU32Be(uint8_t* p, uint32_t value) {
+  p[0] = (uint8_t)(value >> 24);
+  p[1] = (uint8_t)(value >> 16);
+  p[2] = (uint8_t)(value >> 8);
+  p[3] = (uint8_t)value;
+}
+
+bool verifyRpcBinaryEnvelope(
+  uint8_t* frame,
+  size_t frame_size,
+  uint32_t& seq,
+  const uint8_t*& protobuf,
+  size_t& protobuf_size) {
+
+  if(!relay_authenticated || frame_size < 74) return false;
+  if(memcmp(frame, "KRP1", 4) != 0) return false;
+
+  seq = readU32Be(frame + 4);
+  protobuf_size = ((size_t)frame[8] << 8) | frame[9];
+
+  if(seq == 0 || seq <= last_rx_seq) return false;
+  if(protobuf_size == 0 || protobuf_size > 8192) return false;
+  if(frame_size != 10 + protobuf_size + 64) return false;
+
+  protobuf = frame + 10;
+
+  String provided;
+  provided.reserve(64);
+  for(size_t i = 0; i < 64; ++i) {
+    const char ch = (char)frame[10 + protobuf_size + i];
+    if(!isxdigit((unsigned char)ch)) return false;
+    provided += ch;
+  }
+  provided.toLowerCase();
+
+  const String canonical =
+    device_id + "|" + boot_nonce + "|" + seqToString(seq) +
+    "|rpc|" + bytesToHex(protobuf, protobuf_size);
+
+  return secureEqual(hmacHex(auth_token, canonical), provided);
+}
+
+void sendRpcBinaryChunk(const uint8_t* data, size_t size) {
+  if(!relay_connected || !relay_authenticated || !data || size == 0 || size > 1024) return;
+
+  const uint32_t seq = ++tx_seq;
+  const String canonical =
+    device_id + "|" + boot_nonce + "|" + seqToString(seq) +
+    "|rpc_response|" + bytesToHex(data, size);
+  const String mac = hmacHex(auth_token, canonical);
+  if(mac.length() != 64) return;
+
+  const size_t frame_size = 10 + size + 64;
+  uint8_t* frame = (uint8_t*)malloc(frame_size);
+  if(!frame) return;
+
+  memcpy(frame, "KRS1", 4);
+  writeU32Be(frame + 4, seq);
+  frame[8] = (uint8_t)(size >> 8);
+  frame[9] = (uint8_t)size;
+  memcpy(frame + 10, data, size);
+  memcpy(frame + 10 + size, mac.c_str(), 64);
+
+  web_socket.sendBIN(frame, frame_size);
+  free(frame);
+}
+
+void handleRelayRpcBinary(uint8_t* frame, size_t frame_size) {
+  if(marauder_busy) {
+    sendEnvelope("response", "rpc_denied", "{\"error\":\"marauder_busy\"}");
+    return;
+  }
+
+  uint32_t seq = 0;
+  const uint8_t* protobuf = nullptr;
+  size_t protobuf_size = 0;
+
+  if(!verifyRpcBinaryEnvelope(frame, frame_size, seq, protobuf, protobuf_size)) {
+    remoteLog("warn", "invalid_or_replayed_rpc_frame");
+    return;
+  }
+
+  if(!validateReadOnlyDelimitedPbMain(protobuf, protobuf_size)) {
+    sendEnvelope("response", "rpc_denied", "{\"error\":\"rpc_not_readonly_allowlisted\"}");
+    remoteLog("warn", "rpc_request_denied");
+    return;
+  }
+
+  last_rx_seq = seq;
+
+  if(!KorExpansionRpc::active() && !KorExpansionRpc::open()) {
+    sendEnvelope("response", "rpc_unavailable", "{\"error\":\"expansion_uart_unavailable\"}");
+    return;
+  }
+
+  if(!KorExpansionRpc::sendRequest(protobuf, protobuf_size)) {
+    sendEnvelope("response", "rpc_error", "{\"error\":\"expansion_send_failed\"}");
+    return;
+  }
+
+  sendEnvelope("response", "rpc_accepted", "{\"ok\":true}");
+}
+
+void pumpExpansionRpc() {
+  if(!KorExpansionRpc::active()) return;
+
+  KorExpansionRpc::loop();
+
+  uint8_t data[256];
+  size_t size = 0;
+  while((size = KorExpansionRpc::read(data, sizeof(data))) > 0) {
+    sendRpcBinaryChunk(data, size);
+  }
+}
+
+#endif
+
 bool loadWifiProfile(uint8_t index, String& ssid, String& password) {
   if(index >= KOR_WIFI_SLOTS) return false;
 
@@ -290,7 +542,11 @@ String buildStatusJson() {
   doc["relay_authenticated"] = relay_authenticated;
   doc["provisioning"] = provisioning;
   doc["marauder_busy"] = marauder_busy;
+  #ifdef MARAUDER_KOR_RPC
+  doc["rpc"] = KorExpansionRpc::active() ? "experimental-active" : "experimental-ready";
+  #else
   doc["rpc"] = "staged-disabled";
+  #endif
 
   if(WiFi.status() == WL_CONNECTED) {
     doc["ssid"] = WiFi.SSID();
@@ -431,6 +687,9 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     case WStype_DISCONNECTED:
       relay_connected = false;
       relay_authenticated = false;
+      #ifdef MARAUDER_KOR_RPC
+      KorExpansionRpc::close();
+      #endif
       break;
 
     case WStype_TEXT:
@@ -438,7 +697,11 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
       break;
 
     case WStype_BIN:
+      #ifdef MARAUDER_KOR_RPC
+      handleRelayRpcBinary(payload, length);
+      #else
       remoteLog("warn", "binary_frame_denied_in_readonly_milestone");
+      #endif
       break;
 
     default:
@@ -447,6 +710,9 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
 }
 
 void stopRelay() {
+  #ifdef MARAUDER_KOR_RPC
+  KorExpansionRpc::close();
+  #endif
   if(relay_started) web_socket.disconnect();
   relay_started = false;
   relay_connected = false;
@@ -741,6 +1007,10 @@ void KorBridge::begin() {
   bridge_active = enabled();
   if(!bridge_active) return;
 
+  #ifdef MARAUDER_KOR_RPC
+  KorExpansionRpc::begin();
+  #endif
+
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
 
@@ -754,6 +1024,9 @@ void KorBridge::loop(bool marauderBusy) {
   marauder_busy = marauderBusy;
 
   if(marauder_busy) {
+    #ifdef MARAUDER_KOR_RPC
+    KorExpansionRpc::close();
+    #endif
     if(!paused_for_marauder) {
       paused_for_marauder = true;
       stopRelay();
@@ -794,12 +1067,24 @@ void KorBridge::loop(bool marauderBusy) {
   if(!relay_started) startRelay();
   if(relay_started) web_socket.loop();
 
+  #ifdef MARAUDER_KOR_RPC
+  if(relay_connected && relay_authenticated) pumpExpansionRpc();
+  #endif
+
   if(relay_connected && millis() - last_heartbeat >= KOR_APP_HEARTBEAT_MS) {
     last_heartbeat = millis();
     sendEnvelope("event", "heartbeat", buildStatusJson());
   }
 
   delay(1);
+}
+
+bool KorBridge::ownsUart() {
+  #ifdef MARAUDER_KOR_RPC
+  return KorExpansionRpc::ownsUart();
+  #else
+  return false;
+  #endif
 }
 
 String KorBridge::statusJson() {
