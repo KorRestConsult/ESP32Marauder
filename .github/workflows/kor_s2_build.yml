@@ -53,7 +53,7 @@ jobs:
       - name: Build Flipper Zero WiFi Dev Board
         run: |
           mkdir -p build-kor-s2
-          ./bin/arduino-cli compile             --fqbn "esp32:esp32:esp32s2:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=enabled"             --build-property "compiler.cpp.extra_flags=-DMARAUDER_FLIPPER"             --libraries "$PWD/CustomLibs"             --libraries "$PWD/libraries"             --output-dir "$PWD/build-kor-s2"             "$PWD/esp32_marauder"
+          ./bin/arduino-cli compile             --fqbn "esp32:esp32:esp32s2:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=enabled"             --build-property "compiler.cpp.extra_flags=-DMARAUDER_FLIPPER -DMARAUDER_KOR_BRIDGE"             --libraries "$PWD/CustomLibs"             --libraries "$PWD/libraries"             --output-dir "$PWD/build-kor-s2"             "$PWD/esp32_marauder"
 
       - name: Package binaries
         run: |
