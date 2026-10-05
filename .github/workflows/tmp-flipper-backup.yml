@@ -1,0 +1,55 @@
+name: Build Flipper Direct Backup
+
+on:
+  push:
+    branches:
+      - tmp-flipper-backup
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout helper source
+        run: |
+          git clone --depth 1 --branch v1 https://github.com/keetsta/wol-flipper.git helper
+      - name: Install uFBT
+        run: |
+          python3 -m pip install --upgrade ufbt
+      - name: Patch helper to auto-backup
+        working-directory: helper
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("wol_flipper.c")
+          s = p.read_text()
+          old = """    WolApp* app = wol_app_alloc();
+    scene_manager_next_scene(app->scene_manager, WolSceneStart);
+"""
+          new = """    WolApp* app = wol_app_alloc();
+
+    volatile bool cancel = false;
+    WolFlasher* flasher = wol_flasher_alloc(&cancel);
+    WolFlasherResult result = wol_flasher_connect(flasher);
+    if(result == WolFlasherOk) {
+        result = wol_flasher_backup(flasher, WOL_BACKUP_DIR "/esp-direct.bin");
+        wol_flasher_reset_target(flasher);
+    }
+    FURI_LOG_W("WolDirect", "direct backup result: %s", wol_flasher_result_text(result));
+    wol_flasher_free(flasher);
+
+    scene_manager_next_scene(app->scene_manager, WolSceneStart);
+"""
+          if old not in s:
+              raise SystemExit("patch anchor not found")
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Build FAP
+        working-directory: helper
+        run: |
+          ufbt
+      - name: Upload FAP
+        uses: actions/upload-artifact@v4
+        with:
+          name: wol-flipper-direct-backup
+          path: helper/dist/wol_flipper.fap
