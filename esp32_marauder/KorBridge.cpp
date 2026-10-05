@@ -8,16 +8,14 @@
 #include <freertos/task.h>
 #include <freertos/stream_buffer.h>
 
-#include "settings.h"
 #include "kor_expansion_protocol.h"
-
-extern Settings settings_obj;
 
 namespace {
 constexpr uint16_t KOR_LOCAL_PORT = 8765;
 constexpr uint32_t KOR_RPC_BAUD = 115200;
 constexpr uint32_t KOR_FRAME_TIMEOUT_MS = 180;
 constexpr uint32_t KOR_WIFI_RETRY_MS = 10000;
+constexpr uint8_t KOR_WIFI_SLOTS = 8;
 
 Preferences prefs;
 WiFiServer server(KOR_LOCAL_PORT);
@@ -32,6 +30,65 @@ bool client_authed = false;
 String auth_line;
 uint32_t last_wifi_attempt = 0;
 String device_id;
+
+String keyFor(const char* prefix, uint8_t index) {
+  return String(prefix) + String(index);
+}
+
+bool loadWifiProfile(uint8_t index, String& ssid, String& password) {
+  if(index >= KOR_WIFI_SLOTS) return false;
+  prefs.begin("korbridge", true);
+  ssid = prefs.getString(keyFor("s", index).c_str(), "");
+  password = prefs.getString(keyFor("p", index).c_str(), "");
+  prefs.end();
+  return ssid.length() > 0;
+}
+
+uint8_t wifiProfileCount() {
+  uint8_t count = 0;
+  for(uint8_t i = 0; i < KOR_WIFI_SLOTS; ++i) {
+    String ssid, password;
+    if(loadWifiProfile(i, ssid, password)) ++count;
+  }
+  return count;
+}
+
+bool saveWifiProfile(const String& ssid, const String& password) {
+  if(ssid.length() == 0) return false;
+
+  int slot = -1;
+  for(uint8_t i = 0; i < KOR_WIFI_SLOTS; ++i) {
+    String saved, ignored;
+    if(loadWifiProfile(i, saved, ignored)) {
+      if(saved == ssid) {
+        slot = i;
+        break;
+      }
+    } else if(slot < 0) {
+      slot = i;
+    }
+  }
+
+  if(slot < 0) return false;
+
+  prefs.begin("korbridge", false);
+  prefs.putString(keyFor("s", slot).c_str(), ssid);
+  prefs.putString(keyFor("p", slot).c_str(), password);
+  prefs.end();
+  return true;
+}
+
+bool removeWifiProfile(uint8_t index) {
+  if(index >= KOR_WIFI_SLOTS) return false;
+  String ssid, password;
+  if(!loadWifiProfile(index, ssid, password)) return false;
+
+  prefs.begin("korbridge", false);
+  prefs.remove(keyFor("s", index).c_str());
+  prefs.remove(keyFor("p", index).c_str());
+  prefs.end();
+  return true;
+}
 
 size_t serialReceive(uint8_t* data, size_t len, void*) {
   size_t got = 0;
@@ -93,6 +150,7 @@ bool sendControl(ExpansionFrameControlCommand cmd) {
 }
 
 bool sendData(const uint8_t* data, size_t len) {
+  if(len > EXPANSION_PROTOCOL_MAX_DATA_SIZE) return false;
   ExpansionFrame f{};
   f.header.type = ExpansionFrameTypeData;
   f.content.data.size = len;
@@ -104,7 +162,6 @@ bool startRpcSession() {
   Serial.updateBaudRate(EXPANSION_PROTOCOL_DEFAULT_BAUD_RATE);
   while(Serial.available()) Serial.read();
 
-  // Presence pulse used by known ESP32 expansion-module implementations.
   Serial.write((uint8_t)0xF0);
   Serial.flush();
 
@@ -133,7 +190,7 @@ void rpcTask(void*) {
 
   while(true) {
     if(!startRpcSession()) {
-        delay(150);
+      delay(150);
       continue;
     }
 
@@ -194,15 +251,16 @@ String makeDeviceId() {
 String ensureToken() {
   prefs.begin("korbridge", false);
   String token = prefs.getString("token", "");
-  if(token.length() < 16) {
+  if(token.length() < 24) {
     uint64_t mac = ESP.getEfuseMac();
-    char buf[40];
+    char buf[48];
     snprintf(
       buf,
       sizeof(buf),
-      "%08lX%08lX%08lX",
+      "%08lX%08lX%08lX%08lX",
       (unsigned long)(mac >> 32),
       (unsigned long)mac,
+      (unsigned long)esp_random(),
       (unsigned long)esp_random());
     token = String(buf);
     prefs.putString("token", token);
@@ -213,23 +271,22 @@ String ensureToken() {
 
 bool connectSavedWifi() {
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
 
-  const uint8_t count = settings_obj.getSavedWifiCount();
-  for(uint8_t i = 0; i < count; ++i) {
-    String ssid;
-    String password;
-    if(!settings_obj.loadSavedWifiCredential(i, ssid, password)) continue;
-    if(ssid.length() == 0) continue;
+  for(uint8_t i = 0; i < KOR_WIFI_SLOTS; ++i) {
+    String ssid, password;
+    if(!loadWifiProfile(i, ssid, password)) continue;
 
-    WiFi.disconnect(true, true);
+    WiFi.disconnect(false, false);
     delay(50);
-    WiFi.begin(ssid.c_str(), password.c_str());
+
+    if(password.length() > 0) WiFi.begin(ssid.c_str(), password.c_str());
+    else WiFi.begin(ssid.c_str());
 
     const uint32_t start = millis();
     while(WiFi.status() != WL_CONNECTED && millis() - start < 7000) delay(100);
 
     if(WiFi.status() == WL_CONNECTED) {
-      settings_obj.markSavedWifiSuccessful(i);
       server.begin();
       server.setNoDelay(true);
       return true;
@@ -257,9 +314,8 @@ void pumpClient() {
     }
   }
 
-  String token;
   prefs.begin("korbridge", true);
-  token = prefs.getString("token", "");
+  String token = prefs.getString("token", "");
   prefs.end();
 
   if(!client_authed) {
@@ -305,20 +361,21 @@ void pumpClient() {
 }
 
 void printStatus() {
-  prefs.begin("korbridge", true);
-  bool en = prefs.getBool("enabled", false);
-  String token = prefs.getString("token", "");
-  prefs.end();
-
   Serial.println(F("@KOR:{"));
   Serial.print(F("  mode: "));
-  Serial.println(en ? F("bridge") : F("marauder"));
+  Serial.println(KorBridge::enabled() ? F("bridge") : F("marauder"));
   Serial.print(F("  device: "));
   Serial.println(makeDeviceId());
   Serial.print(F("  wifi_profiles: "));
-  Serial.println(settings_obj.getSavedWifiCount());
-  Serial.print(F("  token_set: "));
-  Serial.println(token.length() >= 16 ? F("yes") : F("no"));
+  Serial.println(wifiProfileCount());
+  Serial.print(F("  wifi_status: "));
+  Serial.println(WiFi.status() == WL_CONNECTED ? F("connected") : F("disconnected"));
+  if(WiFi.status() == WL_CONNECTED) {
+    Serial.print(F("  ssid: "));
+    Serial.println(WiFi.SSID());
+    Serial.print(F("  ip: "));
+    Serial.println(WiFi.localIP());
+  }
   Serial.println(F("}"));
 }
 }
@@ -336,7 +393,6 @@ bool KorBridge::active() {
 
 void KorBridge::begin() {
   bridge_active = true;
-  settings_obj.begin();
   device_id = makeDeviceId();
   ensureToken();
 
@@ -376,7 +432,7 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
     Serial.println(F("kor status"));
     Serial.println(F("kor bridge on|off"));
     Serial.println(F("kor wifi list"));
-    Serial.println(F("kor wifi add <ssid> <password>"));
+    Serial.println(F("kor wifi add <ssid> [password]"));
     Serial.println(F("kor wifi remove <index>"));
     Serial.println(F("kor token <value>"));
     return true;
@@ -413,10 +469,9 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
     const String action = args.get(2);
 
     if(action == "list") {
-      const uint8_t count = settings_obj.getSavedWifiCount();
-      for(uint8_t i = 0; i < count; ++i) {
+      for(uint8_t i = 0; i < KOR_WIFI_SLOTS; ++i) {
         String ssid, password;
-        if(settings_obj.loadSavedWifiCredential(i, ssid, password)) {
+        if(loadWifiProfile(i, ssid, password)) {
           Serial.print(i);
           Serial.print(F(": "));
           Serial.println(ssid);
@@ -428,22 +483,21 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
     if(action == "add" && args.size() >= 4) {
       String ssid = args.get(3);
       String password = args.size() >= 5 ? args.get(4) : "";
-      WifiCredentialSaveResult result = settings_obj.saveWifiCredential(ssid, password);
-      Serial.println(result == WIFI_CREDENTIAL_ERROR ? F("ERR") : F("OK"));
+      Serial.println(saveWifiProfile(ssid, password) ? F("OK") : F("ERR"));
       return true;
     }
 
     if(action == "remove" && args.size() >= 4) {
       int idx = args.get(3).toInt();
-      Serial.println(settings_obj.removeSavedWifiCredential((uint8_t)idx) ? F("OK") : F("ERR"));
+      Serial.println(removeWifiProfile((uint8_t)idx) ? F("OK") : F("ERR"));
       return true;
     }
   }
 
   if(sub == "token" && args.size() >= 3) {
     String token = args.get(2);
-    if(token.length() < 16) {
-      Serial.println(F("ERR: token must be at least 16 chars"));
+    if(token.length() < 24) {
+      Serial.println(F("ERR: token must be at least 24 chars"));
       return true;
     }
     prefs.begin("korbridge", false);
