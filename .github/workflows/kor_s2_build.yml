@@ -1,0 +1,71 @@
+name: KOR S2 Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - kor-bridge
+    paths:
+      - "esp32_marauder/**"
+      - ".github/workflows/kor_s2_build.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Arduino CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Install ESP32 core 2.0.11
+        run: |
+          ./bin/arduino-cli core update-index
+          ./bin/arduino-cli core install esp32:esp32@2.0.11
+
+      - name: Fetch Marauder dependencies
+        run: |
+          mkdir -p CustomLibs
+          git clone --depth 1 --branch 1.6 https://github.com/marian-craciunescu/ESP32Ping CustomLibs/ESP32Ping
+          git clone --depth 1 https://github.com/me-no-dev/AsyncTCP CustomLibs/AsyncTCP
+          git clone --depth 1 --branch v2.0.6 https://github.com/stevemarple/MicroNMEA CustomLibs/MicroNMEA
+          git clone --depth 1 https://github.com/bigbrodude6119/ESPAsyncWebServer CustomLibs/ESPAsyncWebServer
+          git clone --depth 1 --branch V2.5.34 https://github.com/Bodmer/TFT_eSPI CustomLibs/TFT_eSPI
+          git clone --depth 1 --branch v1.4 https://github.com/PaulStoffregen/XPT2046_Touchscreen CustomLibs/XPT2046_Touchscreen
+          git clone --depth 1 --branch 3.0.0 https://github.com/lvgl/lv_arduino CustomLibs/lv_arduino
+          git clone --depth 1 --branch 1.8.0 https://github.com/Bodmer/JPEGDecoder CustomLibs/JPEGDecoder
+          git clone --depth 1 --branch 1.3.5 https://github.com/h2zero/NimBLE-Arduino CustomLibs/NimBLE-Arduino
+          git clone --depth 1 --branch 1.10.7 https://github.com/adafruit/Adafruit_NeoPixel CustomLibs/Adafruit_NeoPixel
+          git clone --depth 1 --branch v6.18.2 https://github.com/bblanchon/ArduinoJson CustomLibs/ArduinoJson
+          git clone --depth 1 --branch v1.3.3 https://github.com/ivanseidel/LinkedList CustomLibs/LinkedList
+          git clone --depth 1 --branch 8.1.0 https://github.com/plerup/espsoftwareserial CustomLibs/EspSoftwareSerial
+          git clone --depth 1 --branch 1.15.0 https://github.com/adafruit/Adafruit_BusIO CustomLibs/Adafruit_BusIO
+          git clone --depth 1 --branch 1.0.2 https://github.com/adafruit/Adafruit_MAX1704X CustomLibs/Adafruit_MAX1704X
+
+      - name: Patch ESP32 linker flags
+        run: |
+          PLATFORM="$HOME/.arduino15/packages/esp32/hardware/esp32/2.0.11/platform.txt"
+          sed -i 's/compiler.c.elf.libs.esp32s2=/compiler.c.elf.libs.esp32s2=-zmuldefs /' "$PLATFORM"
+
+      - name: Build Flipper Zero WiFi Dev Board
+        run: |
+          mkdir -p build-kor-s2
+          ./bin/arduino-cli compile             --fqbn "esp32:esp32:esp32s2:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=enabled"             --build-property "compiler.cpp.extra_flags=-DMARAUDER_FLIPPER -DMARAUDER_KOR_BRIDGE"             --libraries "$PWD/CustomLibs"             --libraries "$PWD/libraries"             --output-dir "$PWD/build-kor-s2"             "$PWD/esp32_marauder"
+
+      - name: Package binaries
+        run: |
+          cp build-kor-s2/esp32_marauder.ino.bin build-kor-s2/kor-marauder-s2.bin
+          cp build-kor-s2/esp32_marauder.ino.bootloader.bin build-kor-s2/kor-marauder-s2-bootloader.bin
+          cp build-kor-s2/esp32_marauder.ino.partitions.bin build-kor-s2/kor-marauder-s2-partitions.bin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kor-marauder-s2
+          path: |
+            build-kor-s2/kor-marauder-s2.bin
+            build-kor-s2/kor-marauder-s2-bootloader.bin
+            build-kor-s2/kor-marauder-s2-partitions.bin
