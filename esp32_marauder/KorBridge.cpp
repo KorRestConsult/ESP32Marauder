@@ -133,12 +133,9 @@ void rpcTask(void*) {
 
   while(true) {
     if(!startRpcSession()) {
-      bridge_active = false;
-      delay(150);
+        delay(150);
       continue;
     }
-
-    bridge_active = true;
 
     while(true) {
       size_t n = xStreamBufferReceive(to_flipper, txbuf, sizeof(txbuf), 0);
@@ -182,7 +179,6 @@ void rpcTask(void*) {
       }
     }
 
-    bridge_active = false;
     Serial.updateBaudRate(EXPANSION_PROTOCOL_DEFAULT_BAUD_RATE);
     delay(100);
   }
@@ -339,6 +335,7 @@ bool KorBridge::active() {
 }
 
 void KorBridge::begin() {
+  bridge_active = true;
   settings_obj.begin();
   device_id = makeDeviceId();
   ensureToken();
