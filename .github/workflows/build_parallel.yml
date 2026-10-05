@@ -370,3 +370,5 @@ jobs:
           done
           echo "Timed out waiting for the private C5 binaries" >&2
           exit 1
+
+# KOR fork workflow activation
