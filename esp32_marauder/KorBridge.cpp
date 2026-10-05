@@ -31,6 +31,7 @@ bool provision_saved = false;
 bool relay_started = false;
 bool relay_connected = false;
 bool relay_authenticated = false;
+bool paused_for_marauder = false;
 bool marauder_busy = false;
 
 uint32_t last_wifi_attempt = 0;
@@ -44,7 +45,7 @@ String auth_token;
 String ap_password;
 String relay_host;
 String relay_path;
-String relay_fingerprint;
+String relay_ca;
 uint16_t relay_port = KOR_DEFAULT_RELAY_PORT;
 String local_cli_line;
 
@@ -52,9 +53,9 @@ String keyFor(const char* prefix, uint8_t index) {
   return String(prefix) + String(index);
 }
 
-String u64ToString(uint64_t value) {
-  char buf[24];
-  snprintf(buf, sizeof(buf), "%llu", (unsigned long long)value);
+String seqToString(uint32_t value) {
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%lu", (unsigned long)value);
   return String(buf);
 }
 
@@ -202,7 +203,7 @@ void loadRelayConfig() {
   prefs.begin("korbridge", true);
   relay_host = prefs.getString("relay_host", "");
   relay_path = prefs.getString("relay_path", "/device");
-  relay_fingerprint = prefs.getString("relay_fp", "");
+  relay_ca = prefs.getString("relay_ca", "");
   uint32_t stored_port = prefs.getUInt("relay_port", KOR_DEFAULT_RELAY_PORT);
   prefs.end();
 
@@ -229,7 +230,7 @@ void saveRelayConfig(
 bool relayConfigReady() {
   return relay_host.length() > 0 &&
          relay_path.length() > 0 &&
-         relay_fingerprint.length() >= 40 &&
+         relay_ca.indexOf("BEGIN CERTIFICATE") >= 0 &&
          auth_token.length() >= 48;
 }
 
@@ -270,7 +271,7 @@ void sendEnvelope(const char* type, const String& name, const String& payload) {
 
   const uint32_t seq = ++tx_seq;
   const String canonical =
-    device_id + "|" + boot_nonce + "|" + u64ToString(seq) + "|" +
+    device_id + "|" + boot_nonce + "|" + seqToString(seq) + "|" +
     String(type) + "|" + name + "|" + payload;
 
   DynamicJsonDocument doc(1792);
@@ -312,7 +313,7 @@ bool verifyCommonEnvelope(JsonDocument& doc, const String& expected_type, String
   const String mac = String((const char*)(doc["mac"] | ""));
   if(mac.length() != 64) return false;
 
-  canonical = device_id + "|" + boot_nonce + "|" + u64ToString(seq) + "|" + expected_type;
+  canonical = device_id + "|" + boot_nonce + "|" + seqToString(seq) + "|" + expected_type;
   return true;
 }
 
@@ -399,11 +400,12 @@ void startRelay() {
   web_socket.onEvent(webSocketEvent);
   web_socket.setReconnectInterval(5000);
   web_socket.enableHeartbeat(15000, 3000, 2);
-  web_socket.beginSSL(
+  // Fail closed: WSS only with an explicitly provisioned CA certificate.
+  web_socket.beginSslWithCA(
     relay_host.c_str(),
     relay_port,
     relay_path.c_str(),
-    relay_fingerprint.c_str(),
+    relay_ca.c_str(),
     "kor-bridge-v1");
   relay_started = true;
 }
@@ -482,7 +484,7 @@ void prepareProvisionRoutes() {
       "<label>Relay host</label><br><input name='relay_host'><br>"
       "<label>Relay port</label><br><input name='relay_port' value='443'><br>"
       "<label>Relay path</label><br><input name='relay_path' value='/device'><br>"
-      "<label>TLS SHA1 fingerprint</label><br><input name='relay_fp'><br><br>"
+      "<label>TLS CA certificate (PEM)</label><br><textarea name='relay_ca' rows='10' cols='44'></textarea><br><br>"
       "<button type='submit'>Save</button></form>"
       "<p>After saving, reconnect your phone to normal Wi-Fi.</p></body></html>";
 
@@ -697,7 +699,7 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
     Serial.println(F("kor wifi remove <index>"));
     Serial.println(F("kor wifi open on|off"));
     Serial.println(F("kor relay show"));
-    Serial.println(F("kor relay set <host> <port> <path> <sha1-fingerprint>"));
+    Serial.println(F("kor relay set <host> <port> <path> <ca-via-provisioning>"));
     Serial.println(F("kor provision"));
     Serial.println(F("kor token <value>"));
     return true;
@@ -790,8 +792,8 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
       Serial.println(relay_port);
       Serial.print(F("path="));
       Serial.println(relay_path);
-      Serial.print(F("fingerprint="));
-      Serial.println(relay_fingerprint.length() ? F("set") : F("not-set"));
+      Serial.print(F("ca="));
+      Serial.println(relay_ca.indexOf("BEGIN CERTIFICATE") >= 0 ? F("set") : F("not-set"));
       return true;
     }
 
