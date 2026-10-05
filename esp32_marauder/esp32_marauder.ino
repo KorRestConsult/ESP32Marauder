@@ -45,7 +45,7 @@ https://www.online-utility.org/image/convert/to/XBM
 #endif
 
 #include "settings.h"
-#include "CommandLine.h"
+#include "CommandLine.h"\n#ifdef MARAUDER_KOR_BRIDGE\n  #include "KorBridge.h"\n#endif
 #include "lang_var.h"
 
 #ifdef HAS_BATTERY
