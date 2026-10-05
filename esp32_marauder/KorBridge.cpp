@@ -199,32 +199,6 @@ void setOpenNetworksAllowed(bool allowed) {
   prefs.end();
 }
 
-int hexNibble(char c) {
-  if(c >= '0' && c <= '9') return c - '0';
-  if(c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if(c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
-bool parseRelayFingerprint(const String& input) {
-  String compact;
-  compact.reserve(40);
-  for(size_t i = 0; i < input.length(); ++i) {
-    const char c = input.charAt(i);
-    if(c == ':' || c == ' ' || c == '-') continue;
-    compact += c;
-  }
-  if(compact.length() != 40) return false;
-
-  for(size_t i = 0; i < 20; ++i) {
-    const int hi = hexNibble(compact.charAt(i * 2));
-    const int lo = hexNibble(compact.charAt(i * 2 + 1));
-    if(hi < 0 || lo < 0) return false;
-    relay_fingerprint_bytes[i] = (uint8_t)((hi << 4) | lo);
-  }
-  return true;
-}
-
 void loadRelayConfig() {
   prefs.begin("korbridge", true);
   relay_host = prefs.getString("relay_host", "");
@@ -629,8 +603,6 @@ void KorBridge::loop(bool marauderBusy) {
     Serial.println(F("@KOR resumed"));
   }
 
-  pumpLocalCli();
-
   if(provisioning) {
     provision_server.handleClient();
 
@@ -672,10 +644,6 @@ void KorBridge::loop(bool marauderBusy) {
   }
 
   delay(1);
-}
-
-String KorBridge::statusJson() {
-  return buildStatusJson();
 }
 
 String KorBridge::statusJson() {
