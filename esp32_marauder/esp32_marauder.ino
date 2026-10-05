@@ -374,7 +374,11 @@ void loop()
   #endif
 
   // Update all of our objects
-  cli_obj.main(currentTime);
+  #ifdef MARAUDER_KOR_BRIDGE
+    if(!KorBridge::ownsUart()) cli_obj.main(currentTime);
+  #else
+    cli_obj.main(currentTime);
+  #endif
   #ifdef HAS_SCREEN
     display_obj.main(wifi_scan_obj.currentScanMode);
   #endif
