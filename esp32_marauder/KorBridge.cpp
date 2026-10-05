@@ -217,12 +217,12 @@ void saveRelayConfig(
   const String& host,
   uint16_t port,
   const String& path,
-  const String& fingerprint) {
+  const String& ca) {
   prefs.begin("korbridge", false);
   prefs.putString("relay_host", host);
   prefs.putUInt("relay_port", port);
   prefs.putString("relay_path", path.length() ? path : "/device");
-  prefs.putString("relay_fp", fingerprint);
+  prefs.putString("relay_ca", ca);
   prefs.end();
   loadRelayConfig();
 }
@@ -500,7 +500,7 @@ void prepareProvisionRoutes() {
     const String password = provision_server.arg("password");
     const String host = provision_server.arg("relay_host");
     const String path = provision_server.arg("relay_path");
-    const String fingerprint = provision_server.arg("relay_fp");
+    const String ca = provision_server.arg("relay_ca");
     long port_value = provision_server.arg("relay_port").toInt();
 
     if(port_value <= 0 || port_value > 65535) port_value = KOR_DEFAULT_RELAY_PORT;
@@ -508,8 +508,8 @@ void prepareProvisionRoutes() {
     bool ok = true;
     if(ssid.length()) ok = saveWifiProfile(ssid, password);
     if(host.length()) {
-      if(fingerprint.length() < 40) ok = false;
-      else saveRelayConfig(host, (uint16_t)port_value, path, fingerprint);
+      if(ca.indexOf("BEGIN CERTIFICATE") < 0) ok = false;
+      else saveRelayConfig(host, (uint16_t)port_value, path, ca);
     }
 
     provision_saved = ok;
@@ -619,7 +619,9 @@ bool KorBridge::enabled() {
 }
 
 void KorBridge::begin() {
-  bridge_active = true;
+  bridge_active = enabled();
+  if(!bridge_active) return;
+
   device_id = makeDeviceId();
   boot_nonce = randomHex(16);
   auth_token = ensureToken();
@@ -637,7 +639,27 @@ void KorBridge::begin() {
 }
 
 void KorBridge::loop(bool marauderBusy) {
+  if(!bridge_active) return;
+
   marauder_busy = marauderBusy;
+
+  if(marauderBusy) {
+    if(!paused_for_marauder) {
+      paused_for_marauder = true;
+      stopRelay();
+      stopProvisioning();
+      WiFi.disconnect(false, false);
+      Serial.println(F("@KOR paused: Marauder active"));
+    }
+    return;
+  }
+
+  if(paused_for_marauder) {
+    paused_for_marauder = false;
+    last_wifi_attempt = 0;
+    Serial.println(F("@KOR resumed"));
+  }
+
   pumpLocalCli();
 
   if(provisioning) {
@@ -699,7 +721,7 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
     Serial.println(F("kor wifi remove <index>"));
     Serial.println(F("kor wifi open on|off"));
     Serial.println(F("kor relay show"));
-    Serial.println(F("kor relay set <host> <port> <path> <ca-via-provisioning>"));
+    Serial.println(F("kor relay set <host> <port> <path>"));
     Serial.println(F("kor provision"));
     Serial.println(F("kor token <value>"));
     return true;
@@ -797,20 +819,19 @@ bool KorBridge::handleCli(LinkedList<String>& args) {
       return true;
     }
 
-    if(action == "set" && args.size() >= 7) {
+    if(action == "set" && args.size() >= 6) {
       const String host = args.get(3);
       long port_value = args.get(4).toInt();
       const String path = args.get(5);
-      const String fingerprint = args.get(6);
 
-      if(host.length() == 0 || port_value <= 0 || port_value > 65535 || fingerprint.length() < 40) {
+      if(host.length() == 0 || port_value <= 0 || port_value > 65535) {
         Serial.println(F("ERR: invalid relay settings"));
         return true;
       }
 
-      saveRelayConfig(host, (uint16_t)port_value, path, fingerprint);
+      saveRelayConfig(host, (uint16_t)port_value, path, relay_ca);
       stopRelay();
-      Serial.println(F("OK"));
+      Serial.println(F("OK: endpoint saved; CA PEM via local provisioning"));
       return true;
     }
   }
