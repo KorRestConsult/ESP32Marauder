@@ -188,7 +188,7 @@ bool removeWifiProfile(uint8_t index) {
 
 bool openNetworksAllowed() {
   prefs.begin("korbridge", true);
-  const bool allowed = prefs.getBool("allow_open", true);
+  const bool allowed = prefs.getBool("allow_open", false);
   prefs.end();
   return allowed;
 }
@@ -197,6 +197,32 @@ void setOpenNetworksAllowed(bool allowed) {
   prefs.begin("korbridge", false);
   prefs.putBool("allow_open", allowed);
   prefs.end();
+}
+
+int hexNibble(char c) {
+  if(c >= '0' && c <= '9') return c - '0';
+  if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+bool parseRelayFingerprint(const String& input) {
+  String compact;
+  compact.reserve(40);
+  for(size_t i = 0; i < input.length(); ++i) {
+    const char c = input.charAt(i);
+    if(c == ':' || c == ' ' || c == '-') continue;
+    compact += c;
+  }
+  if(compact.length() != 40) return false;
+
+  for(size_t i = 0; i < 20; ++i) {
+    const int hi = hexNibble(compact.charAt(i * 2));
+    const int lo = hexNibble(compact.charAt(i * 2 + 1));
+    if(hi < 0 || lo < 0) return false;
+    relay_fingerprint_bytes[i] = (uint8_t)((hi << 4) | lo);
+  }
+  return true;
 }
 
 void loadRelayConfig() {
@@ -368,7 +394,6 @@ void webSocketEvent(WStype_t type, uint8_t* payload, size_t length) {
     case WStype_CONNECTED:
       relay_connected = true;
       relay_authenticated = false;
-      last_rx_seq = 0;
       sendEnvelope("hello", "device", buildStatusJson());
       break;
 
@@ -391,7 +416,6 @@ void stopRelay() {
   relay_started = false;
   relay_connected = false;
   relay_authenticated = false;
-  last_rx_seq = 0;
 }
 
 void startRelay() {
@@ -550,61 +574,6 @@ void stopProvisioning() {
   WiFi.mode(WIFI_STA);
 }
 
-LinkedList<String> parseLocalArgs(const String& input) {
-  LinkedList<String> out;
-  String token;
-  bool quoted = false;
-  char quote_char = 0;
-
-  for(size_t i = 0; i < input.length(); ++i) {
-    const char c = input.charAt(i);
-
-    if((c == '"' || c == '\'') && (!quoted || c == quote_char)) {
-      if(!quoted) {
-        quoted = true;
-        quote_char = c;
-      } else {
-        quoted = false;
-        quote_char = 0;
-      }
-      continue;
-    }
-
-    if(c == ' ' && !quoted) {
-      if(token.length()) {
-        out.add(token);
-        token = "";
-      }
-    } else {
-      token += c;
-    }
-  }
-
-  if(token.length()) out.add(token);
-  return out;
-}
-
-void pumpLocalCli() {
-  while(Serial.available()) {
-    const char c = (char)Serial.read();
-
-    if(c == '\n') {
-      local_cli_line.trim();
-      if(local_cli_line.length()) {
-        LinkedList<String> args = parseLocalArgs(local_cli_line);
-        if(!KorBridge::handleCli(args)) Serial.println(F("ERR: bridge mode accepts only kor commands"));
-      }
-      local_cli_line = "";
-      continue;
-    }
-
-    if(c != '\r') {
-      local_cli_line += c;
-      if(local_cli_line.length() > 512) local_cli_line = "";
-    }
-  }
-}
-
 void printStatus() {
   Serial.println(buildStatusJson());
 }
@@ -703,6 +672,10 @@ void KorBridge::loop(bool marauderBusy) {
   }
 
   delay(1);
+}
+
+String KorBridge::statusJson() {
+  return buildStatusJson();
 }
 
 String KorBridge::statusJson() {
