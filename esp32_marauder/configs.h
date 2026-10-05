@@ -4,6 +4,13 @@
 
   #define configs_h
 
+#ifdef MARAUDER_KOR_RPC
+  // RPC build includes the passive KOR Bridge and the standard Flipper target.
+  #ifndef MARAUDER_KOR_BRIDGE
+    #define MARAUDER_KOR_BRIDGE
+  #endif
+#endif
+
 #ifdef MARAUDER_KOR_BRIDGE
   // KOR Bridge is an extension of the standard Flipper Zero WiFi Dev Board target.
   #ifndef MARAUDER_FLIPPER
