@@ -143,7 +143,7 @@ jobs:
         with:
           sketch-names: esp32_marauder.ino
           arduino-board-fqbn: esp32:esp32:esp32s2:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=enabled
-          extra-arduino-cli-args: "--warnings none --build-property compiler.cpp.extra_flags='-DMARAUDER_KOR_BRIDGE'"
+          extra-arduino-cli-args: "--warnings none --build-property compiler.cpp.extra_flags=-DMARAUDER_KOR_RPC"
           arduino-platform: esp32:esp32@2.0.11
           platform-url: https://github.com/espressif/arduino-esp32/releases/download/2.0.11/package_esp32_dev_index.json
 
