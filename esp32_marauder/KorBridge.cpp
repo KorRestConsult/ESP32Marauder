@@ -1,8 +1,7 @@
+#include "configs.h"
 #include "KorBridge.h"
 
 #ifdef MARAUDER_KOR_BRIDGE
-
-#include "configs.h"
 
 #ifdef MARAUDER_KOR_RPC
 #include "KorExpansionRpc.h"
