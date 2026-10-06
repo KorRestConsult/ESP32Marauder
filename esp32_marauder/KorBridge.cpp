@@ -156,7 +156,12 @@ bool secureEqual(const String& a, const String& b) {
   return diff == 0;
 }
 
-void sendEnvelope(const char* type, const String& name, const String& payload);\nvoid remoteLog(const String& level, const String& message);\n\n#ifdef MARAUDER_KOR_RPC\n\nbool readProtoVarint(const uint8_t* data, size_t size, size_t& pos, uint64_t& value) {
+void sendEnvelope(const char* type, const String& name, const String& payload);
+void remoteLog(const String& level, const String& message);
+
+#ifdef MARAUDER_KOR_RPC
+
+bool readProtoVarint(const uint8_t* data, size_t size, size_t& pos, uint64_t& value) {
   value = 0;
   uint8_t shift = 0;
 
